@@ -1,0 +1,29 @@
+[Unit]
+Description=isales-scheduler — lead dispatch scheduler
+After=network.target postgresql.service redis.service
+
+[Service]
+Type=simple
+ExecStart=/opt/isales-scheduler/.venv/bin/isales-scheduler
+Restart=on-failure
+RestartSec=5
+EnvironmentFile=/etc/isales/scheduler.env
+User=isales
+Group=isales
+WorkingDirectory=/opt/isales-scheduler
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
