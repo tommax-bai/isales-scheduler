@@ -1,5 +1,8 @@
-"""Integration tests for dispatch_lead — end-to-end with real PG + Redis,
-mocked telephony-api via httpx MockTransport.
+"""Integration tests for dispatch_lead — end-to-end with real PG + Redis.
+
+Device selection now runs against cloud PG directly (no telephony-api HTTP)
+per arch-cloud-edge-split § service-communication Scenario "scheduler 不再
+HTTP 调 telephony-api".
 """
 
 from __future__ import annotations
@@ -8,16 +11,20 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import httpx
 import pytest
-from isales_common.enums import LeadStatus
+from isales_common.enums import DeviceStatus, LeadStatus
+from isales_common.models import (
+    CampaignDevice,
+    Device,
+    DeviceSimBinding,
+    SimCard,
+)
 from isales_common.models.campaign import Campaign
 from isales_common.models.lead import Lead
 from isales_common.schemas.messages.dial import DialRequest
 
 from isales_scheduler import concurrency
 from isales_scheduler.dispatch import DIAL_QUEUE, dispatch_lead
-from isales_scheduler.telephony import TelephonyClient
 
 TZ = ZoneInfo("Asia/Shanghai")
 
@@ -27,14 +34,10 @@ WORKDAY_WINDOWS: list[dict[str, Any]] = [
 ]
 
 
-def _client_with_handler(handler):  # type: ignore[no-untyped-def]
-    transport = httpx.MockTransport(handler)
-    c = TelephonyClient("http://t.test", timeout=1.0)
-    c._client = httpx.AsyncClient(transport=transport, timeout=1.0)
-    return c
-
-
-async def _seed(sessionmaker_, *, time_windows=WORKDAY_WINDOWS) -> tuple[int, int]:  # type: ignore[no-untyped-def]
+async def _seed_lead(
+    sessionmaker_, *, time_windows=WORKDAY_WINDOWS, with_device: bool = True
+) -> tuple[int, int]:  # type: ignore[no-untyped-def]
+    """Seed one campaign + one lead. If with_device, also seed a bound idle device."""
     async with sessionmaker_() as session:
         camp = Campaign(name="C", time_windows=time_windows, respect_holidays=False)
         session.add(camp)
@@ -46,6 +49,20 @@ async def _seed(sessionmaker_, *, time_windows=WORKDAY_WINDOWS) -> tuple[int, in
             next_call_at=datetime(2026, 5, 4, 10, 0, tzinfo=TZ),
         )
         session.add(lead)
+        await session.flush()
+        if with_device:
+            device = Device(name="d1", status=DeviceStatus.IDLE)
+            session.add(device)
+            await session.flush()
+            sim = SimCard(iccid="89860000000000000001", phone_number="13900000000")
+            session.add(sim)
+            await session.flush()
+            session.add_all([
+                CampaignDevice(campaign_id=camp.id, device_id=device.id),
+                DeviceSimBinding(
+                    device_id=device.id, sim_card_id=sim.id, is_active=True
+                ),
+            ])
         await session.commit()
         return camp.id, lead.id
 
@@ -54,12 +71,7 @@ async def _seed(sessionmaker_, *, time_windows=WORKDAY_WINDOWS) -> tuple[int, in
 async def test_dispatch_success_pushes_message_and_marks_calling(  # type: ignore[no-untyped-def]
     sessionmaker_, redis_client
 ) -> None:
-    camp_id, lead_id = await _seed(sessionmaker_)
-
-    def handler(_req: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"device_id": 7, "phone_number": "13900000000"})
-
-    telephony = _client_with_handler(handler)
+    camp_id, lead_id = await _seed_lead(sessionmaker_)
     now = datetime(2026, 5, 4, 10, 0, tzinfo=TZ)
 
     async with sessionmaker_() as session:
@@ -68,7 +80,6 @@ async def test_dispatch_success_pushes_message_and_marks_calling(  # type: ignor
         ok = await dispatch_lead(
             session=session,
             redis=redis_client,
-            telephony=telephony,
             campaign=camp,
             lead=lead,
             now=now,
@@ -78,7 +89,6 @@ async def test_dispatch_success_pushes_message_and_marks_calling(  # type: ignor
         )
         await session.commit()
 
-    await telephony.aclose()
     assert ok is True
 
     # Lead status flipped to calling
@@ -93,22 +103,25 @@ async def test_dispatch_success_pushes_message_and_marks_calling(  # type: ignor
     assert msg.lead.lead_id == lead_id
     assert msg.lead.campaign_id == camp_id
     assert msg.caller_id == "13900000000"
-    assert msg.device_id == 7
+    assert msg.device_id >= 1
 
     # Concurrency was incremented (and not rolled back)
     assert await concurrency.get(redis_client) == 1
 
+    # Device row was flipped to DIALING + last_call_at set
+    async with sessionmaker_() as session:
+        from sqlalchemy import select
+        dev = (await session.execute(select(Device).limit(1))).scalar_one()
+        assert dev.status == DeviceStatus.DIALING
+        assert dev.last_call_at is not None
+
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_dispatch_device_select_failure_rolls_back_and_keeps_status(  # type: ignore[no-untyped-def]
+async def test_dispatch_no_idle_device_rolls_back_and_keeps_status(  # type: ignore[no-untyped-def]
     sessionmaker_, redis_client
 ) -> None:
-    camp_id, lead_id = await _seed(sessionmaker_)
-
-    def handler(_req: httpx.Request) -> httpx.Response:
-        return httpx.Response(503)
-
-    telephony = _client_with_handler(handler)
+    # Seed without device → no campaign_device row → pick_idle_device returns None
+    camp_id, lead_id = await _seed_lead(sessionmaker_, with_device=False)
     now = datetime(2026, 5, 4, 10, 0, tzinfo=TZ)
 
     async with sessionmaker_() as session:
@@ -117,7 +130,6 @@ async def test_dispatch_device_select_failure_rolls_back_and_keeps_status(  # ty
         ok = await dispatch_lead(
             session=session,
             redis=redis_client,
-            telephony=telephony,
             campaign=camp,
             lead=lead,
             now=now,
@@ -127,7 +139,6 @@ async def test_dispatch_device_select_failure_rolls_back_and_keeps_status(  # ty
         )
         await session.commit()
 
-    await telephony.aclose()
     assert ok is False
 
     async with sessionmaker_() as session:
@@ -140,16 +151,12 @@ async def test_dispatch_device_select_failure_rolls_back_and_keeps_status(  # ty
 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_dispatch_concurrency_full_skips(sessionmaker_, redis_client) -> None:  # type: ignore[no-untyped-def]
-    camp_id, lead_id = await _seed(sessionmaker_)
+    camp_id, lead_id = await _seed_lead(sessionmaker_)
 
     # Pre-fill counter to cap
     for _ in range(8):
         await concurrency.try_increment(redis_client, max_concurrency=8)
 
-    def handler(_req: httpx.Request) -> httpx.Response:
-        raise AssertionError("device_select should not be called")
-
-    telephony = _client_with_handler(handler)
     now = datetime(2026, 5, 4, 10, 0, tzinfo=TZ)
 
     async with sessionmaker_() as session:
@@ -158,7 +165,6 @@ async def test_dispatch_concurrency_full_skips(sessionmaker_, redis_client) -> N
         ok = await dispatch_lead(
             session=session,
             redis=redis_client,
-            telephony=telephony,
             campaign=camp,
             lead=lead,
             now=now,
@@ -168,11 +174,14 @@ async def test_dispatch_concurrency_full_skips(sessionmaker_, redis_client) -> N
         )
         await session.commit()
 
-    await telephony.aclose()
     assert ok is False
     async with sessionmaker_() as session:
         lead2 = await session.get(Lead, lead_id)
         assert lead2.status == LeadStatus.NEW
+        # Device must NOT have been touched (selection short-circuited)
+        from sqlalchemy import select
+        dev = (await session.execute(select(Device).limit(1))).scalar_one()
+        assert dev.status == DeviceStatus.IDLE
     assert await concurrency.get(redis_client) == 8
 
 
@@ -196,10 +205,6 @@ async def test_dispatch_out_of_window_defers_next_call_at(sessionmaker_, redis_c
         await session.commit()
         camp_id, lead_id = camp.id, lead.id
 
-    def handler(_req: httpx.Request) -> httpx.Response:
-        raise AssertionError("device_select should not be called out-of-window")
-
-    telephony = _client_with_handler(handler)
     now = datetime(2026, 5, 4, 14, 0, tzinfo=TZ)
 
     async with sessionmaker_() as session:
@@ -208,7 +213,6 @@ async def test_dispatch_out_of_window_defers_next_call_at(sessionmaker_, redis_c
         ok = await dispatch_lead(
             session=session,
             redis=redis_client,
-            telephony=telephony,
             campaign=camp,
             lead=lead,
             now=now,
@@ -218,7 +222,6 @@ async def test_dispatch_out_of_window_defers_next_call_at(sessionmaker_, redis_c
         )
         await session.commit()
 
-    await telephony.aclose()
     assert ok is False
 
     async with sessionmaker_() as session:

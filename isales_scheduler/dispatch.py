@@ -2,6 +2,8 @@
 
 Spec: retry-followup § Requirement "scheduler 调度数据流";
       service-communication § Requirement "全局并发控制";
+      service-communication § Scenario "scheduler 不再 HTTP 调 telephony-api"
+      (arch-cloud-edge-split: device select via cloud PG, not telephony-api HTTP);
       time-window § Requirement "窗外 lead 推迟到下个窗口开始时刻";
       design.md Decision 8 (失败即 DECR 回滚) / Decision 12 (派发后写
       lead.status='calling', MUST NOT 写终态).
@@ -21,9 +23,9 @@ from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from isales_scheduler import concurrency, time_window
+from isales_scheduler.device_selection import pick_idle_device
 from isales_scheduler.history import pack_history
 from isales_scheduler.prompt import pack_prompt_versions
-from isales_scheduler.telephony import TelephonyClient
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +36,6 @@ async def dispatch_lead(
     *,
     session: AsyncSession,
     redis: Redis[Any],
-    telephony: TelephonyClient,
     campaign: Campaign,
     lead: Lead,
     now: datetime,
@@ -77,8 +78,8 @@ async def dispatch_lead(
         return False
 
     try:
-        # 3) device select
-        device_resp = await telephony.select_device(campaign.id)
+        # 3) device select — cloud PG direct query (replaces HTTP /devices/select)
+        device_resp = await pick_idle_device(session, campaign.id)
         if device_resp is None:
             await concurrency.decrement(redis)
             logger.warning(

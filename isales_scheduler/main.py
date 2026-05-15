@@ -16,7 +16,6 @@ from isales_scheduler.db import get_engine, get_sessionmaker
 from isales_scheduler.loop import scheduler_loop
 from isales_scheduler.redis_client import get_redis
 from isales_scheduler.settings import load_settings
-from isales_scheduler.telephony import TelephonyClient
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +25,6 @@ async def _main() -> None:
     engine = get_engine(settings.database_url)
     sessionmaker = get_sessionmaker(engine)
     redis = get_redis(settings.redis_url)
-    telephony = TelephonyClient(
-        settings.telephony_api_base,
-        timeout=settings.select_timeout_seconds,
-    )
 
     active = ActiveCampaigns(redis)
     await active.restore_from_redis()
@@ -53,7 +48,6 @@ async def _main() -> None:
         scheduler_loop(
             sessionmaker=sessionmaker,
             redis=redis,
-            telephony=telephony,
             active=active,
             settings=settings,
         ),
@@ -74,7 +68,6 @@ async def _main() -> None:
             except Exception:
                 logger.exception("task_shutdown_error name=%s", task.get_name())
 
-        await telephony.aclose()
         await redis.close()
         await engine.dispose()
         logger.info("isales_scheduler_stopped")

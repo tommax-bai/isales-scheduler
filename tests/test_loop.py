@@ -1,4 +1,9 @@
-"""Integration test for one tick — multi-campaign + holiday + concurrency."""
+"""Integration test for one tick — multi-campaign + holiday + concurrency.
+
+After arch-cloud-edge-split, device selection runs against cloud PG instead
+of telephony-api HTTP, so the test seeds real device + sim_card +
+campaign_device rows rather than mocking an HTTP transport.
+"""
 
 from __future__ import annotations
 
@@ -6,9 +11,14 @@ from datetime import date, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import httpx
 import pytest
-from isales_common.enums import LeadStatus
+from isales_common.enums import DeviceStatus, LeadStatus
+from isales_common.models import (
+    CampaignDevice,
+    Device,
+    DeviceSimBinding,
+    SimCard,
+)
 from isales_common.models.campaign import Campaign
 from isales_common.models.holiday import Holiday
 from isales_common.models.lead import Lead
@@ -18,7 +28,6 @@ from isales_scheduler.control import ActiveCampaigns
 from isales_scheduler.dispatch import DIAL_QUEUE
 from isales_scheduler.loop import tick
 from isales_scheduler.settings import Settings
-from isales_scheduler.telephony import TelephonyClient
 
 TZ = ZoneInfo("Asia/Shanghai")
 
@@ -39,22 +48,24 @@ def _settings(max_conc: int = 8, batch: int = 50, hist: int = 3) -> Settings:
     return s
 
 
-def _client_for(devices: list[dict[str, int | str]]):  # type: ignore[no-untyped-def]
-    """A telephony mock that returns devices[0], devices[1], … in order."""
-
-    iterator = iter(devices)
-
-    def handler(_req: httpx.Request) -> httpx.Response:
-        try:
-            d = next(iterator)
-        except StopIteration:
-            return httpx.Response(503)
-        return httpx.Response(200, json=d)
-
-    transport = httpx.MockTransport(handler)
-    c = TelephonyClient("http://t.test", timeout=1.0)
-    c._client = httpx.AsyncClient(transport=transport, timeout=1.0)
-    return c
+async def _seed_devices(session, *, campaign_id: int, count: int) -> None:  # type: ignore[no-untyped-def]
+    """Seed ``count`` idle devices bound to ``campaign_id`` with active SIMs."""
+    for i in range(count):
+        dev = Device(name=f"d{campaign_id}-{i}", status=DeviceStatus.IDLE)
+        session.add(dev)
+        await session.flush()
+        sim = SimCard(
+            iccid=f"898600{campaign_id:04d}{i:010d}",
+            phone_number=f"139000{campaign_id:02d}{i:03d}",
+        )
+        session.add(sim)
+        await session.flush()
+        session.add_all([
+            CampaignDevice(campaign_id=campaign_id, device_id=dev.id),
+            DeviceSimBinding(
+                device_id=dev.id, sim_card_id=sim.id, is_active=True
+            ),
+        ])
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -92,6 +103,10 @@ async def test_tick_dispatches_window_skips_holiday_and_caps_concurrency(  # typ
             )
         # Holiday on now's date → blocks camp_b
         session.add(Holiday(date=date(2026, 5, 4), name="Test Holiday", region="CN"))
+
+        # Seed 10 idle devices for camp_a (more than enough for the 3-cap tick)
+        await _seed_devices(session, campaign_id=camp_a.id, count=10)
+
         await session.commit()
         a_id, b_id = camp_a.id, camp_b.id
 
@@ -101,19 +116,15 @@ async def test_tick_dispatches_window_skips_holiday_and_caps_concurrency(  # typ
     await active.add(b_id)
 
     # Concurrency cap = 3 → only 3 leads of camp_a should dispatch this tick
-    devices = [{"device_id": i + 1, "phone_number": f"139000000{i:02d}"} for i in range(10)]
-    telephony = _client_for(devices)
     settings = _settings(max_conc=3)
 
     await tick(
         sessionmaker=sessionmaker_,
         redis=redis_client,
-        telephony=telephony,
         active=active,
         settings=settings,
         now=now,
     )
-    await telephony.aclose()
 
     # Counter saturated at cap
     assert await concurrency.get(redis_client) == 3
@@ -139,3 +150,15 @@ async def test_tick_dispatches_window_skips_holiday_and_caps_concurrency(  # typ
     assert len(b_leads) == 3
     for lead in b_leads:
         assert lead.status == LeadStatus.NEW
+
+    # 3 devices flipped to DIALING, 7 stayed IDLE
+    async with sessionmaker_() as session:
+        from sqlalchemy import select
+        dialing = await session.execute(
+            select(Device).where(Device.status == DeviceStatus.DIALING)
+        )
+        idle = await session.execute(
+            select(Device).where(Device.status == DeviceStatus.IDLE)
+        )
+    assert len(dialing.scalars().all()) == 3
+    assert len(idle.scalars().all()) == 7

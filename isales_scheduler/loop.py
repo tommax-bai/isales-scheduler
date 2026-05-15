@@ -24,7 +24,6 @@ from isales_scheduler import time_window
 from isales_scheduler.control import ActiveCampaigns
 from isales_scheduler.dispatch import dispatch_lead
 from isales_scheduler.settings import Settings
-from isales_scheduler.telephony import TelephonyClient
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +49,6 @@ async def tick(
     *,
     sessionmaker: async_sessionmaker[Any],
     redis: Redis[Any],
-    telephony: TelephonyClient,
     active: ActiveCampaigns,
     settings: Settings,
     now: datetime | None = None,
@@ -100,7 +98,6 @@ async def tick(
                 ok = await dispatch_lead(
                     session=session,
                     redis=redis,
-                    telephony=telephony,
                     campaign=campaign,
                     lead=lead,
                     now=now,
@@ -118,7 +115,6 @@ async def scheduler_loop(
     *,
     sessionmaker: async_sessionmaker[Any],
     redis: Redis[Any],
-    telephony: TelephonyClient,
     active: ActiveCampaigns,
     settings: Settings,
 ) -> None:
@@ -127,7 +123,6 @@ async def scheduler_loop(
             await tick(
                 sessionmaker=sessionmaker,
                 redis=redis,
-                telephony=telephony,
                 active=active,
                 settings=settings,
             )

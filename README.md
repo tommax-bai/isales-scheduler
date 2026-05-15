@@ -3,9 +3,11 @@
 Lead-dispatch scheduler for the iSales platform (stage 3A).
 
 Polls active campaigns each tick, picks leads whose `next_call_at` is due,
-respects time-windows + holidays + global concurrency, asks `telephony-api`
-to pick a device, packs history + prompt-version snapshot, and pushes a
-`DialRequest` onto `engine:dial` for the engine (stage 4) to consume.
+respects time-windows + holidays + global concurrency, picks the
+longest-idle device directly from PostgreSQL (cloud-edge split — replaces
+the old `telephony-api /devices/select` HTTP call), packs history +
+prompt-version snapshot, and pushes a `DialRequest` onto `engine:dial` for
+the engine to consume.
 
 ## Architecture
 
@@ -27,12 +29,10 @@ to pick a device, packs history + prompt-version snapshot, and pushes a
 |---|---|---|
 | `ISALES_DATABASE_URL` | (required) | postgres async URL (`postgresql+asyncpg://…`) |
 | `ISALES_REDIS_URL` | (required) | redis URL (`redis://localhost:6379/0`) |
-| `ISALES_TELEPHONY_API_BASE` | `http://127.0.0.1:8001` | telephony-api base URL |
 | `ISALES_SCHEDULER_TICK_INTERVAL` | `60` | tick interval in seconds |
 | `ISALES_SCHEDULER_BATCH_SIZE` | `50` | max leads per campaign per tick |
 | `ISALES_SCHEDULER_HISTORY_N` | `3` | last-N call summaries packed into DialRequest |
 | `ISALES_MAX_CONCURRENCY` | `8` | global concurrent-call cap |
-| `ISALES_SELECT_TIMEOUT_SECONDS` | `1.0` | timeout for `/devices/select` |
 | `TZ` | (deployment) | server timezone (e.g. `Asia/Shanghai`); time-windows interpret `09:00` etc. in this zone |
 
 DB migrations run from isales-common's alembic — scheduler does not own
@@ -83,5 +83,6 @@ messages decode without `ValidationError`.
 
     pytest
 
-Integration tests use testcontainers for Postgres + Redis. The test for
-`/devices/select` mocks the telephony-api with `httpx.MockTransport`.
+Integration tests use real Postgres + Redis (skipped if unreachable).
+`tests/test_device_selection.py` covers the new PG-direct device selection,
+including SKIP LOCKED concurrency safety.
