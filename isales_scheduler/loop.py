@@ -77,6 +77,9 @@ async def tick(
                 logger.info("holiday_skip campaign_id=%d date=%s", campaign_id, today)
                 continue
 
+            # next_call_at IS NULL（新建 / 导入后尚未排期的线索）视为"立即
+            # 可呼"——首次入队由此天然覆盖，无需任何服务在创建时初始化
+            # next_call_at。Spec: retry-followup §「新线索首次入队语义」。
             stmt = (
                 select(Lead)
                 .where(Lead.campaign_id == campaign_id)
@@ -85,8 +88,9 @@ async def tick(
                         [LeadStatus.NEW, LeadStatus.RETRYING, LeadStatus.FOLLOWING_UP]
                     )
                 )
-                .where(Lead.next_call_at.is_not(None))
-                .where(Lead.next_call_at <= now)
+                .where(
+                    Lead.next_call_at.is_(None) | (Lead.next_call_at <= now)
+                )
                 .order_by(Lead.next_call_at.asc())
                 .limit(settings.scheduler_batch_size)
             )
