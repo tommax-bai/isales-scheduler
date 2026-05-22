@@ -17,6 +17,7 @@ import asyncio
 import logging
 from typing import Any
 
+from isales_common.redis_keys import SCHEDULER_ACTIVE_CAMPAIGNS_SET
 from isales_common.schemas.messages import (
     CampaignControl,
     PauseCampaign,
@@ -30,7 +31,8 @@ logger = logging.getLogger(__name__)
 
 CONTROL_QUEUE = "scheduler:campaign-control"
 DLQ = "scheduler:dlq"
-ACTIVE_SET = "scheduler:active-campaigns"
+# Shared with isales-api (read-only there); see isales_common.redis_keys.
+ACTIVE_SET = SCHEDULER_ACTIVE_CAMPAIGNS_SET
 SUPPORTED_SCHEMA_VERSIONS = {1}
 
 _CONTROL_ADAPTER: TypeAdapter[CampaignControl] = TypeAdapter(CampaignControl)
