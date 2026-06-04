@@ -34,9 +34,11 @@ async def pack_prompt_versions(
     )
     role_configs = list((await session.execute(stmt)).scalars().all())
 
-    role_llms: list[PromptVersionRef] = []
-    judge_ref: PromptVersionRef | None = None
-    polish_ref: PromptVersionRef | None = None
+    # pipeline-stream-and-referee: dual-LLM snapshot — exactly one main /
+    # referee / extractor slot (last enabled row of each kind wins).
+    main_ref: PromptVersionRef | None = None
+    referee_ref: PromptVersionRef | None = None
+    extractor_ref: PromptVersionRef | None = None
 
     for rc in role_configs:
         if rc.current_prompt_version_id is None:
@@ -45,16 +47,16 @@ async def pack_prompt_versions(
             role_config_id=rc.id,
             prompt_version_id=rc.current_prompt_version_id,
         )
-        if rc.kind == RoleKind.ROLE:
-            role_llms.append(ref)
-        elif rc.kind == RoleKind.JUDGE:
-            judge_ref = ref  # last one wins; data-model expects a single judge
-        elif rc.kind == RoleKind.POLISH:
-            polish_ref = ref
+        if rc.kind == RoleKind.MAIN:
+            main_ref = ref
+        elif rc.kind == RoleKind.REFEREE:
+            referee_ref = ref
+        elif rc.kind == RoleKind.EXTRACTOR:
+            extractor_ref = ref
 
     return PromptVersionsSnapshot(
-        role_llms=role_llms,
-        judge_llm=judge_ref,
-        polish_llm=polish_ref,
+        main_llm=main_ref,
+        referee_llm=referee_ref,
+        extractor_llm=extractor_ref,
         wrap_up_appended=False,
     )

@@ -83,43 +83,44 @@ async def test_pack_prompt_versions_picks_active_per_kind(sessionmaker_) -> None
 
         # Create role_configs first with NULL current_prompt_version_id;
         # then create prompt_versions and update.
-        role = RoleConfig(campaign_id=camp.id, kind=RoleKind.ROLE, model="gpt-4")
-        judge = RoleConfig(campaign_id=camp.id, kind=RoleKind.JUDGE, model="gpt-4")
-        polish = RoleConfig(campaign_id=camp.id, kind=RoleKind.POLISH, model="gpt-4")
-        disabled_role = RoleConfig(
-            campaign_id=camp.id, kind=RoleKind.ROLE, model="gpt-4", enabled=False
+        main = RoleConfig(campaign_id=camp.id, kind=RoleKind.MAIN, model="gpt-4")
+        referee = RoleConfig(campaign_id=camp.id, kind=RoleKind.REFEREE, model="gpt-4")
+        extractor = RoleConfig(campaign_id=camp.id, kind=RoleKind.EXTRACTOR, model="gpt-4")
+        disabled_main = RoleConfig(
+            campaign_id=camp.id, kind=RoleKind.MAIN, model="gpt-4", enabled=False
         )
-        session.add_all([role, judge, polish, disabled_role])
+        session.add_all([main, referee, extractor, disabled_main])
         await session.flush()
 
         from isales_common.enums import PromptScopeType
 
-        pv_role = PromptVersion(
-            scope_type=PromptScopeType.ROLE, scope_id=role.id, content="role", is_active=True
+        pv_main = PromptVersion(
+            scope_type=PromptScopeType.MAIN, scope_id=main.id, content="main", is_active=True
         )
-        pv_judge = PromptVersion(
-            scope_type=PromptScopeType.JUDGE, scope_id=judge.id, content="judge", is_active=True
+        pv_referee = PromptVersion(
+            scope_type=PromptScopeType.REFEREE, scope_id=referee.id,
+            content="referee", is_active=True,
         )
-        pv_polish = PromptVersion(
-            scope_type=PromptScopeType.POLISH, scope_id=polish.id,
-            content="polish", is_active=True,
+        pv_extractor = PromptVersion(
+            scope_type=PromptScopeType.EXTRACTOR, scope_id=extractor.id,
+            content="extractor", is_active=True,
         )
-        session.add_all([pv_role, pv_judge, pv_polish])
+        session.add_all([pv_main, pv_referee, pv_extractor])
         await session.flush()
 
-        role.current_prompt_version_id = pv_role.id
-        judge.current_prompt_version_id = pv_judge.id
-        polish.current_prompt_version_id = pv_polish.id
-        # disabled_role intentionally has no prompt — should be skipped anyway
+        main.current_prompt_version_id = pv_main.id
+        referee.current_prompt_version_id = pv_referee.id
+        extractor.current_prompt_version_id = pv_extractor.id
+        # disabled_main intentionally has no prompt — should be skipped anyway
         await session.commit()
 
         snapshot = await pack_prompt_versions(session, camp.id)
 
-    assert len(snapshot.role_llms) == 1
-    assert snapshot.role_llms[0].role_config_id == role.id
-    assert snapshot.role_llms[0].prompt_version_id == pv_role.id
-    assert snapshot.judge_llm is not None
-    assert snapshot.judge_llm.prompt_version_id == pv_judge.id
-    assert snapshot.polish_llm is not None
-    assert snapshot.polish_llm.prompt_version_id == pv_polish.id
+    assert snapshot.main_llm is not None
+    assert snapshot.main_llm.role_config_id == main.id
+    assert snapshot.main_llm.prompt_version_id == pv_main.id
+    assert snapshot.referee_llm is not None
+    assert snapshot.referee_llm.prompt_version_id == pv_referee.id
+    assert snapshot.extractor_llm is not None
+    assert snapshot.extractor_llm.prompt_version_id == pv_extractor.id
     assert snapshot.wrap_up_appended is False
