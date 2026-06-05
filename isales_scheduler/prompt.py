@@ -16,6 +16,7 @@ from isales_common.models.role_config import RoleConfig
 from isales_common.schemas.messages.dial import (
     PromptVersionRef,
     PromptVersionsSnapshot,
+    RefereePromptVersionRef,
 )
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -34,11 +35,13 @@ async def pack_prompt_versions(
     )
     role_configs = list((await session.execute(stmt)).scalars().all())
 
-    # pipeline-stream-and-referee: dual-LLM snapshot — exactly one main /
-    # referee / extractor slot (last enabled row of each kind wins).
+    # engine-multi-referee-and-restructure: N referees (each tagged with its
+    # routing label) + one main / restructure / extractor slot (last enabled row
+    # of each singleton kind wins).
     main_ref: PromptVersionRef | None = None
-    referee_ref: PromptVersionRef | None = None
+    restructure_ref: PromptVersionRef | None = None
     extractor_ref: PromptVersionRef | None = None
+    referee_refs: list[RefereePromptVersionRef] = []
 
     for rc in role_configs:
         if rc.current_prompt_version_id is None:
@@ -50,13 +53,22 @@ async def pack_prompt_versions(
         if rc.kind == RoleKind.MAIN:
             main_ref = ref
         elif rc.kind == RoleKind.REFEREE:
-            referee_ref = ref
+            referee_refs.append(
+                RefereePromptVersionRef(
+                    role_config_id=rc.id,
+                    prompt_version_id=rc.current_prompt_version_id,
+                    label=rc.label,
+                )
+            )
+        elif rc.kind == RoleKind.RESTRUCTURE:
+            restructure_ref = ref
         elif rc.kind == RoleKind.EXTRACTOR:
             extractor_ref = ref
 
     return PromptVersionsSnapshot(
         main_llm=main_ref,
-        referee_llm=referee_ref,
+        referee_llms=referee_refs,
+        restructure_llm=restructure_ref,
         extractor_llm=extractor_ref,
         wrap_up_appended=False,
     )

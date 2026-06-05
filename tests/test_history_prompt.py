@@ -119,8 +119,8 @@ async def test_pack_prompt_versions_picks_active_per_kind(sessionmaker_) -> None
     assert snapshot.main_llm is not None
     assert snapshot.main_llm.role_config_id == main.id
     assert snapshot.main_llm.prompt_version_id == pv_main.id
-    assert snapshot.referee_llm is not None
-    assert snapshot.referee_llm.prompt_version_id == pv_referee.id
+    assert len(snapshot.referee_llms) == 1
+    assert snapshot.referee_llms[0].prompt_version_id == pv_referee.id
     assert snapshot.extractor_llm is not None
     assert snapshot.extractor_llm.prompt_version_id == pv_extractor.id
     assert snapshot.wrap_up_appended is False
