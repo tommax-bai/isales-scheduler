@@ -124,3 +124,55 @@ async def test_pack_prompt_versions_picks_active_per_kind(sessionmaker_) -> None
     assert snapshot.extractor_llm is not None
     assert snapshot.extractor_llm.prompt_version_id == pv_extractor.id
     assert snapshot.wrap_up_appended is False
+    # no personas configured → empty list (backward compatible)
+    assert snapshot.persona_llms == []
+
+
+async def test_pack_prompt_versions_includes_personas(sessionmaker_) -> None:  # type: ignore[no-untyped-def]
+    # engine-tools-multidialogue-gating: kind=persona rows pack into persona_llms,
+    # tagged with their label (independent of the referee label namespace).
+    async with sessionmaker_() as session:
+        from isales_common.enums import PromptScopeType
+
+        camp = Campaign(name="C-persona")
+        session.add(camp)
+        await session.flush()
+
+        main = RoleConfig(campaign_id=camp.id, kind=RoleKind.MAIN, model="gpt-4")
+        # a referee and a persona that happen to share the label "warm" — must
+        # NOT collide (addressed by kind + label).
+        referee = RoleConfig(
+            campaign_id=camp.id, kind=RoleKind.REFEREE, model="gpt-4", label="warm"
+        )
+        persona = RoleConfig(
+            campaign_id=camp.id, kind=RoleKind.PERSONA, model="gpt-4", label="warm"
+        )
+        session.add_all([main, referee, persona])
+        await session.flush()
+
+        pv_main = PromptVersion(
+            scope_type=PromptScopeType.MAIN, scope_id=main.id, content="m", is_active=True
+        )
+        pv_referee = PromptVersion(
+            scope_type=PromptScopeType.REFEREE, scope_id=referee.id, content="r", is_active=True
+        )
+        pv_persona = PromptVersion(
+            scope_type=PromptScopeType.PERSONA, scope_id=persona.id, content="p", is_active=True
+        )
+        session.add_all([pv_main, pv_referee, pv_persona])
+        await session.flush()
+
+        main.current_prompt_version_id = pv_main.id
+        referee.current_prompt_version_id = pv_referee.id
+        persona.current_prompt_version_id = pv_persona.id
+        await session.commit()
+
+        snapshot = await pack_prompt_versions(session, camp.id)
+
+    assert len(snapshot.persona_llms) == 1
+    assert snapshot.persona_llms[0].label == "warm"
+    assert snapshot.persona_llms[0].prompt_version_id == pv_persona.id
+    # referee packing unchanged + label namespace isolated
+    assert len(snapshot.referee_llms) == 1
+    assert snapshot.referee_llms[0].label == "warm"
+    assert snapshot.referee_llms[0].prompt_version_id == pv_referee.id

@@ -14,6 +14,7 @@ import logging
 from isales_common.enums import RoleKind
 from isales_common.models.role_config import RoleConfig
 from isales_common.schemas.messages.dial import (
+    PersonaPromptVersionRef,
     PromptVersionRef,
     PromptVersionsSnapshot,
     RefereePromptVersionRef,
@@ -42,6 +43,10 @@ async def pack_prompt_versions(
     restructure_ref: PromptVersionRef | None = None
     extractor_ref: PromptVersionRef | None = None
     referee_refs: list[RefereePromptVersionRef] = []
+    # engine-tools-multidialogue-gating: opt-in speculative dialogue personas,
+    # packed like referees (label is the stable id routing rules bind to). The
+    # persona label namespace is independent of the referee label namespace.
+    persona_refs: list[PersonaPromptVersionRef] = []
 
     for rc in role_configs:
         if rc.current_prompt_version_id is None:
@@ -60,6 +65,14 @@ async def pack_prompt_versions(
                     label=rc.label,
                 )
             )
+        elif rc.kind == RoleKind.PERSONA:
+            persona_refs.append(
+                PersonaPromptVersionRef(
+                    role_config_id=rc.id,
+                    prompt_version_id=rc.current_prompt_version_id,
+                    label=rc.label,
+                )
+            )
         elif rc.kind == RoleKind.RESTRUCTURE:
             restructure_ref = ref
         elif rc.kind == RoleKind.EXTRACTOR:
@@ -68,6 +81,7 @@ async def pack_prompt_versions(
     return PromptVersionsSnapshot(
         main_llm=main_ref,
         referee_llms=referee_refs,
+        persona_llms=persona_refs,
         restructure_llm=restructure_ref,
         extractor_llm=extractor_ref,
         wrap_up_appended=False,
