@@ -87,6 +87,7 @@ async def _handle_message(
     raw: str,
     active: ActiveCampaigns,
     redis: Redis[Any],
+    wake_event: asyncio.Event,
 ) -> None:
     sv = _parse_schema_version(raw)
     if sv is None or sv not in SUPPORTED_SCHEMA_VERSIONS:
@@ -104,12 +105,13 @@ async def _handle_message(
     if isinstance(msg, (StartCampaign, ResumeCampaign)):
         await active.add(msg.campaign_id)
         logger.info("active_added campaign_id=%d type=%s", msg.campaign_id, msg.type)
+        wake_event.set()  # 立即唤醒 scheduler tick
     elif isinstance(msg, PauseCampaign):
         await active.remove(msg.campaign_id)
         logger.info("active_removed campaign_id=%d", msg.campaign_id)
 
 
-async def control_loop(active: ActiveCampaigns, redis: Redis[Any]) -> None:
+async def control_loop(active: ActiveCampaigns, redis: Redis[Any], wake_event: asyncio.Event) -> None:
     """BLPOP loop. Cancellable; surfaces non-fatal errors to logger.
 
     BLPOP timeout is short (1s) so asyncio cancellation propagates promptly
@@ -130,7 +132,7 @@ async def control_loop(active: ActiveCampaigns, redis: Redis[Any]) -> None:
             continue
         _key, raw = popped
         try:
-            await _handle_message(raw, active, redis)
+            await _handle_message(raw, active, redis, wake_event)
         except asyncio.CancelledError:
             raise
         except Exception:

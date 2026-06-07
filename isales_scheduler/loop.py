@@ -121,6 +121,7 @@ async def scheduler_loop(
     redis: Redis[Any],
     active: ActiveCampaigns,
     settings: Settings,
+    wake_event: asyncio.Event,
 ) -> None:
     while True:
         try:
@@ -134,4 +135,10 @@ async def scheduler_loop(
             raise
         except Exception:
             logger.exception("tick_failed")
-        await asyncio.sleep(settings.scheduler_tick_interval)
+        # 可中断等待：收到 wake_event 则立即执行下一个 tick
+        try:
+            await asyncio.wait_for(wake_event.wait(), timeout=settings.scheduler_tick_interval)
+            wake_event.clear()
+            logger.info("tick_wakeup_immediate")
+        except asyncio.TimeoutError:
+            pass  # 正常周期性 tick

@@ -29,6 +29,7 @@ async def _main() -> None:
     active = ActiveCampaigns(redis)
     await active.restore_from_redis()
 
+    wake_event = asyncio.Event()
     stop_event = asyncio.Event()
 
     def _request_stop() -> None:
@@ -42,7 +43,7 @@ async def _main() -> None:
             loop.add_signal_handler(sig, _request_stop)
 
     control_task = asyncio.create_task(
-        control_loop(active, redis), name="control_loop"
+        control_loop(active, redis, wake_event), name="control_loop"
     )
     scheduler_task = asyncio.create_task(
         scheduler_loop(
@@ -50,6 +51,7 @@ async def _main() -> None:
             redis=redis,
             active=active,
             settings=settings,
+            wake_event=wake_event,
         ),
         name="scheduler_loop",
     )
